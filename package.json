@@ -29,12 +29,19 @@
     "appId": "com.wallhaven.studio",
     "productName": "Wallhaven Studio",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
     ],
     "win": {
       "target": [
@@ -45,14 +52,17 @@
           ]
         }
       ],
-      "artifactName": "Wallhaven-Studio-Setup-${version}.${ext}"
+      "artifactName": "Wallhaven-Studio-Setup-${version}.${ext}",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Wallhaven Studio"
+      "shortcutName": "Wallhaven Studio",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
     }
   }
 }

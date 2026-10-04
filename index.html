@@ -5,6 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0a111d" />
     <title>Wallhaven Studio</title>
+    <script>
+      // 启动时先按上次解析出的主题渲染，避免闪烁；React 挂载后再校正
+      (function () {
+        try {
+          var cached = localStorage.getItem('wallhaven-theme-resolved')
+          var theme = cached === 'light' || cached === 'dark' || cached === 'contrast' ? cached : 'dark'
+          document.documentElement.dataset.theme = theme
+          document.documentElement.style.background = theme === 'light' ? '#edf1f8' : '#0a111d'
+        } catch (_) {}
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
