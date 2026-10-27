@@ -10,9 +10,11 @@
     "build": "vite build",
     "start": "electron .",
     "dist": "vite build && electron-builder --win nsis",
-    "dist:dir": "vite build && electron-builder --win dir"
+    "dist:dir": "vite build && electron-builder --win dir",
+    "release": "vite build && electron-builder --win nsis --publish always"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -28,6 +30,14 @@
   "build": {
     "appId": "com.wallhaven.studio",
     "productName": "Wallhaven Studio",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ouobao",
+        "repo": "wallhaven-desktop",
+        "releaseType": "release"
+      }
+    ],
     "directories": {
       "output": "release",
       "buildResources": "build"

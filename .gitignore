@@ -2,3 +2,8 @@ node_modules/
 dist/
 release/
 *.log
+
+# 本地资料与验证产物，不属于应用源码
+laptop-images/
+docs/diagnostics/
+screenshots/

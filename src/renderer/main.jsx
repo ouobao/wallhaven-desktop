@@ -5,6 +5,7 @@ import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
+  ArrowUpCircle,
   BookOpen,
   Check,
   ChevronDown,
@@ -21,9 +22,11 @@ import {
   ImageDown,
   Images,
   Info,
+  Keyboard,
   KeyRound,
   Layers3,
   LayoutDashboard,
+  ListChecks,
   ListFilter,
   LoaderCircle,
   Lock,
@@ -38,6 +41,7 @@ import {
   PanelLeftOpen,
   Play,
   RefreshCw,
+  RotateCw,
   Search,
   Settings,
   SlidersHorizontal,
@@ -50,7 +54,9 @@ import {
   TriangleAlert,
   UserRound,
   X,
-  Zap
+  Zap,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react'
 import './styles.css'
 
@@ -165,6 +171,41 @@ const THEME_OPTIONS = [
 
 const THEME_LABELS = Object.fromEntries(THEME_OPTIONS.map((option) => [option.value, option.label]))
 
+const WALLPAPER_STYLES = [
+  { value: 'fill', label: '填充', hint: '裁剪边缘铺满屏幕' },
+  { value: 'fit', label: '适应', hint: '完整显示，可能留边' },
+  { value: 'stretch', label: '拉伸', hint: '拉伸到屏幕比例' },
+  { value: 'center', label: '居中', hint: '按原始尺寸居中' },
+  { value: 'tile', label: '平铺', hint: '重复平铺填满屏幕' },
+  { value: 'span', label: '跨屏铺满', hint: '多显示器拼成一整张' }
+]
+
+const ROTATION_SOURCES = [
+  { value: 'toplist', label: '热门榜单', hint: '从本周热门里挑一张' },
+  { value: 'random', label: '随机探索', hint: '随机抽一张新的' },
+  { value: 'favorites', label: '本地收藏', hint: '只用已下载的收藏' },
+  { value: 'downloads', label: '下载目录', hint: '只用目录里已有的图片' }
+]
+
+const ROTATION_INTERVALS = [15, 30, 60, 120, 240, 480, 720, 1440].map((minutes) => ({
+  value: String(minutes),
+  label: minutes < 60 ? `${minutes} 分钟` : minutes === 60 ? '1 小时' : `${minutes / 60} 小时`
+}))
+
+const SHORTCUTS = [
+  { keys: ['Ctrl', 'K'], label: '聚焦搜索框' },
+  { keys: ['Ctrl', 'F'], label: '打开筛选器' },
+  { keys: ['Ctrl', 'D'], label: '打开下载管理' },
+  { keys: ['Ctrl', 'R'], label: '刷新当前内容' },
+  { keys: ['Ctrl', 'A'], label: '全选当前页壁纸' },
+  { keys: ['Esc'], label: '关闭弹窗 / 退出多选' },
+  { keys: ['←', '→'], label: '详情里切换上一张 / 下一张' },
+  { keys: ['空格'], label: '详情里收藏 / 取消收藏' },
+  { keys: ['D'], label: '详情里下载原图' },
+  { keys: ['W'], label: '详情里设为桌面壁纸' },
+  { keys: ['?'], label: '打开快捷键面板' }
+]
+
 const formatNumber = (value = 0) => new Intl.NumberFormat('zh-CN', { notation: value > 9999 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value)
 const formatDate = (value = '') => value ? value.split(' ')[0].replaceAll('-', '.') : '刚刚'
 const formatBytes = (value = 0) => {
@@ -204,10 +245,17 @@ function getImageUrl(wallpaper) {
 }
 
 function getStoredFavoriteItems() {
+  // 旧版本把收藏放在 localStorage，这里仅作为迁移来源；真实数据在 userData/favorites.json
   try {
     const value = JSON.parse(localStorage.getItem('wallhaven-favorites') || '[]')
     return Array.isArray(value) ? value.filter((item) => item && typeof item === 'object' && item.id) : []
   } catch (_) { return [] }
+}
+
+function isEditableTarget(target) {
+  if (!target) return false
+  const tag = target.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable
 }
 
 /* 读取上次保存的筛选条件，只接受已知字段，避免脏数据 */
@@ -344,8 +392,21 @@ function App() {
   const [isPreviewClosing, setIsPreviewClosing] = useState(false)
   const [removePrompt, setRemovePrompt] = useState(null)
   const [isRemoveClosing, setIsRemoveClosing] = useState(false)
+  const [isShortcutsOpen, setIsShortcutsOpen] = useState(false)
+  const [isShortcutsClosing, setIsShortcutsClosing] = useState(false)
+  const [isUpdateOpen, setIsUpdateOpen] = useState(false)
+  const [isRotationOpen, setIsRotationOpen] = useState(false)
+  const [isRotationClosing, setIsRotationClosing] = useState(false)
+  const [contextMenu, setContextMenu] = useState(null)
+  const [selectedIds, setSelectedIds] = useState([])
+  const [rotation, setRotation] = useState(null)
+  const [favoritesReady, setFavoritesReady] = useState(false)
+  const [updateState, setUpdateState] = useState(null)
+  const [appInfo, setAppInfo] = useState(null)
   const searchInputRef = useRef(null)
   const mainScrollRef = useRef(null)
+  const stateRef = useRef({})
+  const loadTokenRef = useRef(0)
 
   const isConnected = config.apiKeySet
   const favoriteIds = useMemo(() => favoriteItems.map((wallpaper) => wallpaper.id), [favoriteItems])
@@ -355,6 +416,43 @@ function App() {
   useEffect(() => {
     window.wallhaven?.config.get().then(setConfig).catch(() => {}).finally(() => setConfigLoaded(true))
   }, [])
+
+  /* ============ 收藏：从 userData/favorites.json 读取，并迁移旧 localStorage 数据 ============ */
+  useEffect(() => {
+    const api = window.wallhaven?.favorites
+    if (!api?.list) { setFavoritesReady(true); return }
+    let mounted = true
+    ;(async () => {
+      try {
+        const exists = await api.exists?.()
+        if (!exists) {
+          // 首次启动：把旧版本存在 localStorage 的收藏搬过来
+          const legacy = getStoredFavoriteItems()
+          if (legacy.length) {
+            const merged = await api.merge(legacy)
+            if (mounted && Array.isArray(merged?.items)) setFavoriteItems(merged.items)
+            localStorage.removeItem('wallhaven-favorites')
+          }
+        } else {
+          const items = await api.list()
+          if (mounted && Array.isArray(items)) setFavoriteItems(items)
+        }
+      } catch (_) {
+      } finally {
+        if (mounted) setFavoritesReady(true)
+      }
+    })()
+    return () => { mounted = false }
+  }, [])
+
+  /* 收藏变更写回磁盘（等首次加载完成后再写，避免把空数组覆盖真实数据） */
+  const favoritesLoadedRef = useRef(false)
+  useEffect(() => {
+    if (!favoritesReady) return
+    if (!favoritesLoadedRef.current) { favoritesLoadedRef.current = true; return }
+    window.wallhaven?.favorites?.replace?.(favoriteItems).catch(() => {})
+  }, [favoriteItems, favoritesReady])
+
 
   useEffect(() => {
     const api = window.wallhaven?.download
@@ -383,16 +481,72 @@ function App() {
   }, [])
 
   useEffect(() => {
-    localStorage.setItem('wallhaven-favorites', JSON.stringify(favoriteItems))
-  }, [favoriteItems])
-
-  useEffect(() => {
     try {
       const snapshot = {}
       for (const key of PERSISTED_FILTER_KEYS) snapshot[key] = filters[key]
       localStorage.setItem('wallhaven-filters', JSON.stringify(snapshot))
     } catch (_) {}
   }, [filters])
+
+  useEffect(() => {
+    const api = window.wallhaven?.rotation
+    if (!api?.get) return undefined
+    api.get().then((next) => { if (next) setRotation(next) }).catch(() => {})
+    const unsubscribe = api.onState?.((payload) => {
+      if (payload?.rotation) setRotation(payload.rotation)
+    })
+    return () => { try { unsubscribe?.() } catch (_) {} }
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.wallhaven?.app?.onNotify?.((payload) => {
+      if (payload?.message) notify(payload.message, payload.type === 'warning' ? 'warning' : 'info')
+    })
+    return () => { try { unsubscribe?.() } catch (_) {} }
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.wallhaven?.app?.onOpenPanel?.((payload) => {
+      if (payload?.panel === 'downloads') setIsDownloadsOpen(true)
+    })
+    return () => { try { unsubscribe?.() } catch (_) {} }
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.wallhaven?.config?.onChanged?.((next) => {
+      if (next) setConfig(next)
+    })
+    return () => { try { unsubscribe?.() } catch (_) {} }
+  }, [])
+
+  useEffect(() => {
+    window.wallhaven?.app?.info?.().then(setAppInfo).catch(() => {})
+  }, [])
+
+  /* ============ 应用更新：状态由主进程推送，整个应用只保留一份 ============ */
+  useEffect(() => {
+    const api = window.wallhaven?.update
+    if (!api?.getState) return undefined
+    let mounted = true
+    api.getState().then((next) => { if (mounted && next) setUpdateState(next) }).catch(() => {})
+    const unsubscribe = api.onState?.((next) => {
+      if (!next) return
+      setUpdateState((current) => {
+        // 下载完成只提示一次；出错信息显示在更新面板内，不再额外弹 toast
+        if (next.status === 'downloaded' && current?.status !== 'downloaded') notify(`新版本 v${next.newVersion} 已下载，重启即可安装`)
+        return next
+      })
+    })
+    return () => { mounted = false; try { unsubscribe?.() } catch (_) {} }
+  }, [])
+
+  async function checkForUpdates() {
+    try {
+      await window.wallhaven.update.check()
+    } catch (error) {
+      notify(error?.message || '检查更新失败', 'warning')
+    }
+  }
 
   useEffect(() => {
     const resolved = config.resolvedTheme || (config.theme === 'system' ? 'dark' : config.theme) || 'dark'
@@ -440,11 +594,85 @@ function App() {
     }
   }
 
+  /* 键盘操作流：Ctrl+K/F/D/R/A、Esc、?、详情内 ←/→/空格/D/W */
   useEffect(() => {
     function handleShortcut(event) {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      const mod = event.ctrlKey || event.metaKey
+      const key = event.key
+      const lower = key.toLowerCase()
+      const typing = isEditableTarget(event.target)
+
+      if (mod && lower === 'k') {
         event.preventDefault()
         searchInputRef.current?.focus()
+        searchInputRef.current?.select?.()
+        return
+      }
+      if (mod && lower === 'f') {
+        event.preventDefault()
+        setIsFilterOpen(true)
+        return
+      }
+      if (mod && lower === 'd') {
+        event.preventDefault()
+        setIsDownloadsOpen(true)
+        return
+      }
+      if (mod && lower === 'r') {
+        event.preventDefault()
+        const current = stateRef.current
+        current.reload?.()
+        return
+      }
+      if (mod && lower === 'a' && !typing) {
+        const current = stateRef.current
+        if (current.displayWallpapers?.length) {
+          event.preventDefault()
+          current.selectAll?.()
+        }
+        return
+      }
+      if (key === 'Escape') {
+        const current = stateRef.current
+        if (current.anyOverlayOpen) {
+          event.preventDefault()
+          current.closeTopOverlay?.()
+        }
+        return
+      }
+      if (typing || mod || event.altKey) {
+        // 详情弹窗打开时，方向键/空格不应该被遗留的搜索框吞掉
+        const current = stateRef.current
+        if (typing && current.selected && !mod && !event.altKey) {
+          if (event.key === 'ArrowLeft') { event.preventDefault(); current.stepSelection?.(-1) }
+          else if (event.key === 'ArrowRight') { event.preventDefault(); current.stepSelection?.(1) }
+        }
+        return
+      }
+
+      if (key === '?') {
+        event.preventDefault()
+        setIsShortcutsOpen(true)
+        return
+      }
+
+      const current = stateRef.current
+      if (!current.selected) return
+      if (key === 'ArrowLeft') {
+        event.preventDefault()
+        current.stepSelection?.(-1)
+      } else if (key === 'ArrowRight') {
+        event.preventDefault()
+        current.stepSelection?.(1)
+      } else if (key === ' ') {
+        event.preventDefault()
+        current.toggleSelectedFavorite?.()
+      } else if (lower === 'd') {
+        event.preventDefault()
+        current.downloadSelected?.()
+      } else if (lower === 'w') {
+        event.preventDefault()
+        current.setSelectedAsWallpaper?.()
       }
     }
     window.addEventListener('keydown', handleShortcut)
@@ -471,21 +699,25 @@ function App() {
   }, [configLoaded])
 
   async function loadWallpapers(nextFilters = filters, page = 1) {
+    const token = ++loadTokenRef.current
     setIsLoading(true)
     setStatus({ kind: 'loading', text: '正在同步 Wallhaven 内容…' })
     try {
       const data = await window.wallhaven.api.request('/search', buildQuery(nextFilters, page, config.username, randomSeed))
+      // 用户已经发起了更新的请求，丢弃这次过期结果
+      if (token !== loadTokenRef.current) return
       setWallpapers(data?.data || [])
       setMeta(data?.meta || { current_page: page, last_page: page, total: data?.data?.length || 0 })
       if (nextFilters.sorting === 'random' && data?.meta?.seed) setRandomSeed(data.meta.seed)
       setStatus({ kind: 'connected', text: config.apiKeySet ? '已连接 Wallhaven API' : '公开内容 · Wallhaven API' })
     } catch (error) {
+      if (token !== loadTokenRef.current) return
       setWallpapers(DEMO_WALLPAPERS)
       setMeta({ current_page: 1, last_page: 1, total: DEMO_WALLPAPERS.length })
       setStatus({ kind: 'demo', text: '无法连接实时 API · 当前显示演示内容' })
       notify(error?.message || '连接失败，已切换至演示内容', 'warning')
     } finally {
-      setIsLoading(false)
+      if (token === loadTokenRef.current) setIsLoading(false)
     }
   }
 
@@ -596,6 +828,7 @@ function App() {
   function handleNav(id) {
     setActiveNav(id)
     setActiveCollection(null)
+    setSelectedIds([])
     mainScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
     if (id === 'latest') {
       const next = { ...filters, q: '', sorting: 'date_added', queryType: 'all' }
@@ -623,6 +856,74 @@ function App() {
   function toggleFavorite(wallpaper) {
     setFavoriteItems((current) => current.some((item) => item.id === wallpaper.id) ? current.filter((item) => item.id !== wallpaper.id) : [...current, wallpaper])
     notify(favoriteIds.includes(wallpaper.id) ? '已从本地收藏移除' : '已加入本地收藏')
+  }
+
+  /* ============ 批量选择 ============ */
+  function toggleSelect(wallpaper) {
+    setSelectedIds((current) => current.includes(wallpaper.id) ? current.filter((id) => id !== wallpaper.id) : [...current, wallpaper.id])
+  }
+
+  function clearSelection() {
+    setSelectedIds([])
+  }
+
+  function selectAllVisible() {
+    setSelectedIds((current) => {
+      const visible = stateRef.current.displayWallpapers || []
+      const allSelected = visible.length > 0 && visible.every((item) => current.includes(item.id))
+      return allSelected ? [] : visible.map((item) => item.id)
+    })
+  }
+
+  async function batchDownload() {
+    const visible = stateRef.current.displayWallpapers || []
+    const targets = visible.filter((item) => selectedIds.includes(item.id))
+    if (!targets.length) return
+    setSelectedIds([])
+    notify(`正在加入下载队列：${targets.length} 张`)
+    for (const item of targets) {
+      // 逐张走同一套查重逻辑，已下载的不会重复下载
+      await downloadWallpaper(item).catch(() => {})
+    }
+  }
+
+  function batchFavorite() {
+    const visible = stateRef.current.displayWallpapers || []
+    const targets = visible.filter((item) => selectedIds.includes(item.id))
+    if (!targets.length) return
+    setFavoriteItems((current) => {
+      const ids = new Set(current.map((item) => item.id))
+      const additions = targets.filter((item) => !ids.has(item.id))
+      return [...current, ...additions]
+    })
+    setSelectedIds([])
+    notify(`已收藏选中的 ${targets.length} 张壁纸`)
+  }
+
+  /* ============ 详情内翻页 ============ */
+  function stepSelection(direction) {
+    const visible = stateRef.current.displayWallpapers || []
+    if (!selected || visible.length < 2) return
+    const index = visible.findIndex((item) => item.id === selected.id)
+    if (index === -1) return
+    const nextIndex = (index + direction + visible.length) % visible.length
+    openWallpaper(visible[nextIndex])
+  }
+
+  function closeTopOverlay() {
+    if (contextMenu) { setContextMenu(null); return }
+    if (isShortcutsOpen) { closeShortcuts(); return }
+    if (isRotationOpen) { closeRotation(); return }
+    if (isUpdateOpen) { setIsUpdateOpen(false); return }
+    if (removePrompt) { closeRemovePrompt(); return }
+    if (previewFile) { closeDownloadPreview(); return }
+    if (duplicatePrompt) { closeDuplicatePrompt(); return }
+    if (isDownloadsOpen) { closeDownloads(); return }
+    if (isSettingsOpen) { setIsSettingsOpen(false); return }
+    if (isLoginOpen) { setIsLoginOpen(false); return }
+    if (selected) { setSelected(null); return }
+    if (isFilterOpen) { closeFilter(); return }
+    if (selectedIds.length) { setSelectedIds([]); return }
   }
 
   function buildDownloadPayload(wallpaper) {
@@ -810,6 +1111,25 @@ function App() {
     window.setTimeout(() => { setIsFilterOpen(false); setIsFilterClosing(false) }, 200)
   }
 
+  function closeRotation() {
+    if (!isRotationOpen || isRotationClosing) return
+    setIsRotationClosing(true)
+    window.setTimeout(() => { setIsRotationOpen(false); setIsRotationClosing(false) }, 220)
+  }
+
+  function closeShortcuts() {
+    if (!isShortcutsOpen || isShortcutsClosing) return
+    setIsShortcutsClosing(true)
+    window.setTimeout(() => { setIsShortcutsOpen(false); setIsShortcutsClosing(false) }, 220)
+  }
+
+  function openContextMenu(wallpaper, event) {
+    if (!wallpaper) return
+    const x = Math.min(event.clientX, window.innerWidth - 232)
+    const y = Math.min(event.clientY, window.innerHeight - 300)
+    setContextMenu({ wallpaper, x: Math.max(10, x), y: Math.max(10, y) })
+  }
+
   function applyFilter() {
     setIsFilterOpen(false)
     setIsFilterClosing(false)
@@ -824,6 +1144,21 @@ function App() {
 
   const displayWallpapers = activeNav === 'favorites' ? favoriteWallpapers : activeNav === 'collections' && activeCollection ? collectionItems : wallpapers
   const activeLabel = activeNav === 'discover' ? (filters.q ? `搜索：${filters.q}` : '精选推荐') : NAV_ITEMS.find((item) => item.id === activeNav)?.label || '精选推荐'
+  const anyOverlayOpen = isShortcutsOpen || isRotationOpen || isUpdateOpen || Boolean(contextMenu) || Boolean(removePrompt) || Boolean(previewFile) || Boolean(duplicatePrompt) || isDownloadsOpen || isSettingsOpen || isLoginOpen || Boolean(selected) || isFilterOpen
+
+  /* 把最新状态同步给键盘处理器，避免闭包拿到旧值 */
+  stateRef.current = {
+    displayWallpapers,
+    selected,
+    anyOverlayOpen,
+    reload: () => loadWallpapers(filters, meta.current_page || 1),
+    selectAll: selectAllVisible,
+    closeTopOverlay,
+    stepSelection,
+    toggleSelectedFavorite: () => selected && toggleFavorite(selected),
+    downloadSelected: () => selected && downloadWallpaper(selected),
+    setSelectedAsWallpaper: () => selected && downloadWallpaper(selected, 'wallpaper')
+  }
 
   return (
     <div className="app-frame">
@@ -861,9 +1196,19 @@ function App() {
             <span className="nav-label">下载管理</span>
             {activeDownloadCount > 0 && <small>{activeDownloadCount}</small>}
           </button>
+          <button className={`nav-item ${rotation?.enabled ? 'active' : ''}`} onClick={() => { setIsRotationOpen(true); closeFilter() }} title={sidebarCollapsed ? '自动换壁纸' : undefined}>
+            <span className="nav-icon"><RotateCw size={16} strokeWidth={2.2} /></span>
+            <span className="nav-label">自动换壁纸</span>
+            {rotation?.enabled && <i className="status-dot" />}
+          </button>
           <button className="nav-item" onClick={() => setIsSettingsOpen(true)} title={sidebarCollapsed ? '偏好设置' : undefined}>
             <span className="nav-icon"><Settings size={16} strokeWidth={2.2} /></span>
             <span className="nav-label">偏好设置</span>
+          </button>
+          <button className={`nav-item ${isUpdateOpen ? 'active' : ''}`} onClick={() => { setIsUpdateOpen(true); checkForUpdates() }} title={sidebarCollapsed ? '检查更新' : undefined}>
+            <span className="nav-icon"><ArrowUpCircle size={16} strokeWidth={2.2} /></span>
+            <span className="nav-label">检查更新</span>
+            {(updateState?.status === 'available' || updateState?.status === 'downloaded') && <i className="status-dot" />}
           </button>
           <button className="nav-item" onClick={() => setIsLoginOpen(true)} title={sidebarCollapsed ? '账户连接' : undefined}>
             <span className="nav-icon"><KeyRound size={16} strokeWidth={2.2} /></span>
@@ -893,9 +1238,10 @@ function App() {
             <kbd>Ctrl K</kbd>
           </form>
           <div className="topbar-actions">
-            <button className="icon-button" onClick={() => loadWallpapers(filters, 1)} aria-label="刷新内容" title="刷新内容"><RefreshCw size={18} className={isLoading ? 'spin' : ''} /></button>
+            <button className="icon-button" onClick={() => setIsShortcutsOpen(true)} aria-label="快捷键" title="快捷键 (?)"><Keyboard size={18} /></button>
+            <button className="icon-button" onClick={() => loadWallpapers(filters, 1)} aria-label="刷新内容" title="刷新内容 (Ctrl+R)"><RefreshCw size={18} className={isLoading ? 'spin' : ''} /></button>
             <ThemeSwitcher mode={config.theme || 'system'} resolved={config.resolvedTheme} systemTheme={config.systemTheme} onChange={changeTheme} />
-            <button className={`icon-button download-indicator ${activeDownloadCount > 0 ? 'busy' : ''}`} onClick={() => setIsDownloadsOpen(true)} aria-label="下载管理" title="下载管理">
+            <button className={`icon-button download-indicator ${activeDownloadCount > 0 ? 'busy' : ''}`} onClick={() => setIsDownloadsOpen(true)} aria-label="下载管理" title="下载管理 (Ctrl+D)">
               <ArrowDownToLine size={18} />
               {activeDownloadCount > 0 && <span className="download-badge">{activeDownloadCount}</span>}
             </button>
@@ -928,7 +1274,19 @@ function App() {
               <div className="results-toolbar">
                 <span><strong>{formatNumber(meta.total || displayWallpapers.length)}</strong> 张壁纸</span>
                 <div className="toolbar-actions">
-                  <button className="text-button" onClick={() => setIsFilterOpen(true)}><Palette size={15} />按颜色筛选</button>
+                  {selectedIds.length ? (
+                    <div className="selection-bar">
+                      <span>已选 {selectedIds.length} 张</span>
+                      <button className="text-button" onClick={batchDownload}><Download size={15} />批量下载</button>
+                      <button className="text-button" onClick={batchFavorite}><Heart size={15} />批量收藏</button>
+                      <button className="text-button" onClick={clearSelection}><X size={15} />取消选择</button>
+                    </div>
+                  ) : (
+                    <>
+                      <button className="text-button" onClick={selectAllVisible}><ListChecks size={15} />多选</button>
+                      <button className="text-button" onClick={() => setIsFilterOpen(true)}><Palette size={15} />按颜色筛选</button>
+                    </>
+                  )}
                   <span className="sort-label">排序</span>
                   <SelectMenu className="compact" value={filters.sorting} options={SORT_OPTIONS} onChange={(next) => { const nextFilters = { ...filters, sorting: next }; setFilters(nextFilters); loadWallpapers(nextFilters, 1) }} ariaLabel="排序方式" />
                 </div>
@@ -936,7 +1294,7 @@ function App() {
 
               {isLoading && <GallerySkeleton viewMode={viewMode} />}
               {!isLoading && displayWallpapers.length === 0 && <EmptyState activeNav={activeNav} onExplore={() => handleNav('discover')} />}
-              {!isLoading && displayWallpapers.length > 0 && <Gallery wallpapers={displayWallpapers} viewMode={viewMode} favoriteIds={favoriteIds} onSelect={openWallpaper} onFavorite={toggleFavorite} onDownload={downloadWallpaper} />}
+              {!isLoading && displayWallpapers.length > 0 && <Gallery wallpapers={displayWallpapers} viewMode={viewMode} favoriteIds={favoriteIds} selectedIds={selectedIds} onSelect={openWallpaper} onFavorite={toggleFavorite} onDownload={downloadWallpaper} onToggleSelect={toggleSelect} onContextMenu={openContextMenu} />}
 
               {!isLoading && activeNav !== 'favorites' && (meta.last_page > 1 || meta.current_page > 1) && <Pagination meta={meta} onChange={changePage} />}
             </div>
@@ -953,13 +1311,80 @@ function App() {
         </div>
       )}
 
+      {isRotationOpen && (
+        <RotationPanel
+          closing={isRotationClosing}
+          rotation={rotation}
+          onClose={closeRotation}
+          onChange={async (patch) => {
+            try {
+              const next = await window.wallhaven.rotation.update(patch)
+              setRotation(next)
+            } catch (error) {
+              notify(error?.message || '更新轮换设置失败', 'warning')
+            }
+          }}
+          onRunNow={async () => {
+            notify('正在挑一张壁纸…')
+            try {
+              const result = await window.wallhaven.rotation.runNow()
+              if (result?.error) notify(result.error, 'warning')
+            } catch (error) {
+              notify(error?.message || '换壁纸失败', 'warning')
+            }
+          }}
+        />
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          data={contextMenu}
+          onClose={() => setContextMenu(null)}
+          onOpen={() => openWallpaper(contextMenu.wallpaper)}
+          onDownload={() => downloadWallpaper(contextMenu.wallpaper)}
+          onApply={(target) => downloadWallpaper(contextMenu.wallpaper, target)}
+          onFavorite={() => toggleFavorite(contextMenu.wallpaper)}
+          onCopyId={() => {
+            navigator.clipboard?.writeText(contextMenu.wallpaper.id).then(() => notify('已复制壁纸 ID'), () => notify('复制失败', 'warning'))
+          }}
+          onCopyLink={() => {
+            const url = contextMenu.wallpaper.url || `https://wallhaven.cc/w/${contextMenu.wallpaper.id}`
+            navigator.clipboard?.writeText(url).then(() => notify('已复制官网链接'), () => notify('复制失败', 'warning'))
+          }}
+          onSimilar={() => {
+            const similarQuery = buildSimilarQuery(contextMenu.wallpaper)
+            if (!similarQuery) { notify('这张壁纸没有可用于查找相似的标签', 'warning'); return }
+            const next = { ...filters, q: similarQuery }
+            setFilters(next)
+            setDraftSearch(similarQuery)
+            setActiveNav('discover')
+            loadWallpapers(next, 1)
+          }}
+        />
+      )}
+
+      {isShortcutsOpen && <ShortcutsPanel closing={isShortcutsClosing} onClose={closeShortcuts} />}
+
+      {isUpdateOpen && (
+        <UpdateModal
+          state={updateState}
+          appInfo={appInfo}
+          onClose={() => setIsUpdateOpen(false)}
+          onCheck={checkForUpdates}
+          onDownload={async () => { try { await window.wallhaven.update.download() } catch (error) { notify(error?.message || '下载更新失败', 'warning') } }}
+          onCancel={async () => { try { await window.wallhaven.update.cancel() } catch (_) {} }}
+          onInstall={async () => { try { await window.wallhaven.update.install() } catch (error) { notify(error?.message || '安装更新失败', 'warning') } }}
+          onOpenRelease={() => window.wallhaven.update.openReleasePage()}
+        />
+      )}
+
       {isDownloadsOpen && <DownloadsPanel tasks={downloadTasks} closing={isDownloadsClosing} activeCount={activeDownloadCount} onClose={closeDownloads} onCancel={cancelDownload} onRetry={retryDownload} onClearFinished={clearFinishedDownloads} onPreview={openDownloadPreview} onApplyTarget={applyFile} onRemove={requestRemove} />}
       {duplicatePrompt && <DuplicateDownloadModal data={duplicatePrompt} closing={isDuplicateClosing} onClose={closeDuplicatePrompt} onRedownload={redownloadDuplicate} onPreview={previewDuplicate} onApplyTarget={setDuplicateTarget} />}
       {previewFile && <DownloadPreviewModal data={previewFile} closing={isPreviewClosing} onClose={closeDownloadPreview} onApplyTarget={applyFile} />}
       {removePrompt && <RemoveDownloadModal data={removePrompt} closing={isRemoveClosing} onClose={closeRemovePrompt} onRemoveOnly={() => confirmRemove(false)} onRemoveAndDelete={() => confirmRemove(true)} />}
-      {selected && <WallpaperModal wallpaper={selected} isFavorite={favoriteIds.includes(selected.id)} onClose={() => setSelected(null)} onFavorite={() => toggleFavorite(selected)} onDownload={downloadWallpaper} onSimilar={() => { const similarQuery = buildSimilarQuery(selected); if (!similarQuery) { notify('这张壁纸没有可用于查找相似的标签', 'warning'); return } setSelected(null); const next = { ...filters, q: similarQuery }; setFilters(next); setDraftSearch(similarQuery); setActiveNav('discover'); loadWallpapers(next, 1) }} onTag={(tag) => { setSelected(null); const next = { ...filters, q: tag }; setFilters(next); setDraftSearch(tag); setActiveNav('discover'); loadWallpapers(next, 1) }} onOpenExternal={() => window.wallhaven.openExternal(selected.url || `https://wallhaven.cc/w/${selected.id}`)} />}
+      {selected && <WallpaperModal wallpaper={selected} isFavorite={favoriteIds.includes(selected.id)} hasSiblings={displayWallpapers.length > 1} onPrev={() => stepSelection(-1)} onNext={() => stepSelection(1)} onClose={() => setSelected(null)} onFavorite={() => toggleFavorite(selected)} onDownload={downloadWallpaper} onSimilar={() => { const similarQuery = buildSimilarQuery(selected); if (!similarQuery) { notify('这张壁纸没有可用于查找相似的标签', 'warning'); return } setSelected(null); const next = { ...filters, q: similarQuery }; setFilters(next); setDraftSearch(similarQuery); setActiveNav('discover'); loadWallpapers(next, 1) }} onTag={(tag) => { setSelected(null); const next = { ...filters, q: tag }; setFilters(next); setDraftSearch(tag); setActiveNav('discover'); loadWallpapers(next, 1) }} onOpenExternal={() => window.wallhaven.openExternal(selected.url || `https://wallhaven.cc/w/${selected.id}`)} />}
       {isLoginOpen && <AccountModal config={config} onClose={() => setIsLoginOpen(false)} onSaved={(next) => { setConfig(next); setIsLoginOpen(false); notify('账户配置已保存'); loadWallpapers(filters, 1) }} onDisconnect={async () => { const next = await window.wallhaven.config.save({ apiKey: '' }); setConfig(next); setIsLoginOpen(false); setActiveNav('discover'); notify('已断开 Wallhaven API Key'); loadWallpapers(filters, 1) }} />}
-      {isSettingsOpen && <SettingsModal config={config} onClose={() => setIsSettingsOpen(false)} onSaved={(next) => { setConfig(next); setIsSettingsOpen(false); notify('偏好设置已保存') }} onChooseFolder={chooseDownloadFolder} />}
+      {isSettingsOpen && <SettingsModal config={config} onClose={() => setIsSettingsOpen(false)} onSaved={(next) => { setConfig(next); setIsSettingsOpen(false); notify('偏好设置已保存') }} onChooseFolder={chooseDownloadFolder} onNotify={(message, type) => notify(message, type)} onFavoritesImported={(items) => { setFavoriteItems(items); favoritesLoadedRef.current = true }} />}
       {toast && <div className={`toast ${toast.type}`}><span className="toast-icon">{toast.type === 'warning' ? <Info size={16} /> : <Check size={16} />}</span>{toast.message}</div>}
       </div>
     </div>
@@ -1180,12 +1605,99 @@ function DownloadsPanel({ tasks, closing, activeCount, onClose, onCancel, onRetr
 function DownloadPreviewModal({ data, closing, onClose, onApplyTarget }) {
   const { filePath, title } = data
   const fileUrl = window.wallhaven?.system?.fileUrl ? window.wallhaven.system.fileUrl(filePath) : ''
+  const [zoom, setZoom] = useState(1)
+  const [offset, setOffset] = useState({ x: 0, y: 0 })
+  const [dragging, setDragging] = useState(false)
+  const dragRef = useRef(null)
+  const stageRef = useRef(null)
+
+  const MIN_ZOOM = 0.2
+  const MAX_ZOOM = 6
+
+  const clampOffset = useCallback((next, zoomValue) => {
+    if (zoomValue <= 1) return { x: 0, y: 0 }
+    const stage = stageRef.current
+    if (!stage) return next
+    const maxX = (stage.clientWidth * (zoomValue - 1)) / 2
+    const maxY = (stage.clientHeight * (zoomValue - 1)) / 2
+    return { x: Math.max(-maxX, Math.min(maxX, next.x)), y: Math.max(-maxY, Math.min(maxY, next.y)) }
+  }, [])
+
+  const zoomBy = useCallback((delta) => {
+    setZoom((current) => {
+      const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number((current * delta).toFixed(3))))
+      setOffset((current2) => clampOffset(current2, next))
+      return next
+    })
+  }, [clampOffset])
+
+  const reset = useCallback(() => { setZoom(1); setOffset({ x: 0, y: 0 }) }, [])
+
+  /* 滚轮缩放：以指针位置为中心 */
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return undefined
+    function handleWheel(event) {
+      event.preventDefault()
+      const delta = event.deltaY < 0 ? 1.12 : 1 / 1.12
+      setZoom((current) => {
+        const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number((current * delta).toFixed(3))))
+        if (next <= 1) { setOffset({ x: 0, y: 0 }); return next }
+        const rect = stage.getBoundingClientRect()
+        const px = event.clientX - rect.left - rect.width / 2
+        const py = event.clientY - rect.top - rect.height / 2
+        const ratio = next / current
+        setOffset((currentOffset) => {
+          const moved = { x: currentOffset.x - px * (ratio - 1), y: currentOffset.y - py * (ratio - 1) }
+          return clampOffset(moved, next)
+        })
+        return next
+      })
+    }
+    stage.addEventListener('wheel', handleWheel, { passive: false })
+    return () => stage.removeEventListener('wheel', handleWheel)
+  }, [clampOffset])
+
+  const handlePointerDown = (event) => {
+    if (zoom <= 1) return
+    event.preventDefault()
+    dragRef.current = { startX: event.clientX, startY: event.clientY, origin: offset }
+    setDragging(true)
+  }
+  const handlePointerMove = (event) => {
+    if (!dragRef.current) return
+    const dx = event.clientX - dragRef.current.startX
+    const dy = event.clientY - dragRef.current.startY
+    setOffset(clampOffset({ x: dragRef.current.origin.x + dx, y: dragRef.current.origin.y + dy }, zoom))
+  }
+  const handlePointerUp = () => { dragRef.current = null; setDragging(false) }
+
   return (
     <div className={`modal-backdrop preview-backdrop ${closing ? 'closing' : ''}`} onMouseDown={onClose}>
       <div className="preview-modal" onMouseDown={(event) => event.stopPropagation()}>
         <button className="modal-close" onClick={onClose} aria-label="关闭预览"><X size={18} /></button>
-        <div className="preview-stage">
-          <img src={fileUrl} alt={title} draggable={false} />
+        <div
+          className={`preview-stage ${zoom > 1 ? 'zoomable' : ''} ${dragging ? 'dragging' : ''}`}
+          ref={stageRef}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
+          onDoubleClick={() => (zoom > 1 ? reset() : setZoom(2))}
+        >
+          <img
+            src={fileUrl}
+            alt={title}
+            draggable={false}
+            style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}
+          />
+        </div>
+        <div className="preview-zoom-bar">
+          <button className="download-action" onClick={() => zoomBy(1 / 1.25)} title="缩小" aria-label="缩小"><ZoomOut size={15} /></button>
+          <span className="preview-zoom-value">{Math.round(zoom * 100)}%</span>
+          <button className="download-action" onClick={() => zoomBy(1.25)} title="放大" aria-label="放大"><ZoomIn size={15} /></button>
+          <button className="text-button" onClick={reset}>适应窗口</button>
+          <span className="preview-zoom-hint">滚轮缩放 · 拖动平移 · 双击 100%</span>
         </div>
         <div className="preview-footer">
           <div className="preview-copy">
@@ -1194,6 +1706,7 @@ function DownloadPreviewModal({ data, closing, onClose, onApplyTarget }) {
             <p className="preview-path" title={filePath}>{filePath}</p>
           </div>
           <div className="preview-actions">
+            <button className="secondary-button" onClick={() => window.wallhaven?.download?.showInFolder?.(filePath)}><FolderOpen size={16} />定位文件</button>
             <button className="secondary-button" onClick={() => onApplyTarget(filePath, 'wallpaper')}><Monitor size={16} />设为桌面</button>
             <button className="secondary-button" onClick={() => onApplyTarget(filePath, 'lockscreen')}><Lock size={16} />设为锁屏</button>
             <button className="primary-button" onClick={() => onApplyTarget(filePath, 'both')}><MonitorSmartphone size={16} />桌面 + 锁屏</button>
@@ -1373,17 +1886,28 @@ function FilterGroup({ label, hint, children }) {
   return <div className="filter-group"><div className="filter-label">{label} {hint && <span>{hint}</span>}</div>{children}</div>
 }
 
-function Gallery({ wallpapers, viewMode, favoriteIds, onSelect, onFavorite, onDownload }) {
-  return <div className={`gallery ${viewMode === 'list' ? 'list-view' : ''}`}>{wallpapers.map((wallpaper, index) => <WallpaperCard key={`${wallpaper.id}-${index}`} index={index} wallpaper={wallpaper} isFavorite={favoriteIds.includes(wallpaper.id)} onSelect={onSelect} onFavorite={onFavorite} onDownload={onDownload} />)}</div>
+function Gallery({ wallpapers, viewMode, favoriteIds, selectedIds = [], onSelect, onFavorite, onDownload, onToggleSelect, onContextMenu }) {
+  return <div className={`gallery ${viewMode === 'list' ? 'list-view' : ''}`}>{wallpapers.map((wallpaper, index) => <WallpaperCard key={`${wallpaper.id}-${index}`} index={index} wallpaper={wallpaper} isFavorite={favoriteIds.includes(wallpaper.id)} isSelected={selectedIds.includes(wallpaper.id)} selectionActive={selectedIds.length > 0} onSelect={onSelect} onFavorite={onFavorite} onDownload={onDownload} onToggleSelect={onToggleSelect} onContextMenu={onContextMenu} />)}</div>
 }
 
-function WallpaperCard({ wallpaper, index = 0, isFavorite, onSelect, onFavorite, onDownload }) {
+function WallpaperCard({ wallpaper, index = 0, isFavorite, isSelected = false, selectionActive = false, onSelect, onFavorite, onDownload, onToggleSelect, onContextMenu }) {
   return (
-    <article className="wallpaper-card" style={{ animationDelay: `${Math.min(index * 0.025, 0.6)}s` }} onClick={() => onSelect(wallpaper)}>
+    <article
+      className={`wallpaper-card ${isSelected ? 'selected' : ''}`}
+      style={{ animationDelay: `${Math.min(index * 0.025, 0.6)}s` }}
+      onClick={() => (selectionActive ? onToggleSelect?.(wallpaper) : onSelect(wallpaper))}
+      onContextMenu={(event) => { event.preventDefault(); onContextMenu?.(wallpaper, event) }}
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') { event.preventDefault(); onSelect(wallpaper) }
+        if (event.key === ' ') { event.preventDefault(); onToggleSelect?.(wallpaper) }
+      }}
+    >
       <div className="wallpaper-image-wrap">
         <SmartImage src={getThumb(wallpaper)} alt={wallpaper.title || `Wallhaven ${wallpaper.id}`} eager={index < 4} />
         <div className="image-overlay" />
         <div className="card-topline"><span className={`purity-badge ${wallpaper.purity}`}>{wallpaper.purity === 'sfw' ? 'SFW' : wallpaper.purity === 'sketchy' ? 'SKETCHY' : 'NSFW'}</span><button className={`heart-button ${isFavorite ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); onFavorite(wallpaper) }} aria-label={isFavorite ? '取消收藏' : '加入收藏'}><Heart size={16} fill={isFavorite ? 'currentColor' : 'none'} stroke={isFavorite ? 'none' : 'currentColor'} /></button></div>
+        <button className={`select-toggle ${isSelected ? 'active' : ''}`} onClick={(event) => { event.stopPropagation(); onToggleSelect?.(wallpaper) }} aria-label={isSelected ? '取消选择' : '选择这张壁纸'} title="选择"><Check size={14} /></button>
         <div className="card-hover-actions"><button onClick={(event) => { event.stopPropagation(); onDownload(wallpaper) }} title="下载原图"><Download size={16} /></button><button onClick={(event) => { event.stopPropagation(); onSelect(wallpaper) }} title="查看详情"><Info size={16} /></button></div>
         <div className="card-gradient-meta"><span>{wallpaper.resolution || `${wallpaper.dimension_x}×${wallpaper.dimension_y}`}</span><span>{wallpaper.file_type?.split('/')[1]?.toUpperCase() || 'JPG'}</span></div>
       </div>
@@ -1407,7 +1931,7 @@ function Pagination({ meta, onChange }) {
   return <div className="pagination"><button className="page-arrow" disabled={current <= 1} onClick={() => onChange(current - 1)}><ChevronLeft size={17} /></button>{pages.map((page, index) => <React.Fragment key={page}>{index > 0 && page - pages[index - 1] > 1 && <span className="page-ellipsis">…</span>}<button className={page === current ? 'current' : ''} onClick={() => onChange(page)}>{page}</button></React.Fragment>)}<button className="page-arrow" disabled={current >= last} onClick={() => onChange(current + 1)}><ChevronRight size={17} /></button></div>
 }
 
-function WallpaperModal({ wallpaper, isFavorite, onClose, onFavorite, onDownload, onSimilar, onTag, onOpenExternal }) {
+function WallpaperModal({ wallpaper, isFavorite, onClose, onFavorite, onDownload, onSimilar, onTag, onOpenExternal, onPrev, onNext, hasSiblings }) {
   const { closing, close } = useClosing(240)
   const imageUrl = getImageUrl(wallpaper)
   const thumbUrl = getThumb(wallpaper)
@@ -1415,6 +1939,16 @@ function WallpaperModal({ wallpaper, isFavorite, onClose, onFavorite, onDownload
   const [imageState, setImageState] = useState({ status: 'loading', url: imageUrl, fallback: false })
   const handleClose = () => close(onClose)
   const retryRef = useRef(0)
+  const rootRef = useRef(null)
+
+  /* 打开详情时把焦点从搜索框移走，否则空格/方向键会被输入框吃掉 */
+  useEffect(() => {
+    const node = rootRef.current
+    if (!node) return
+    const active = document.activeElement
+    if (active && node.contains(active)) return
+    node.focus({ preventScroll: true })
+  }, [wallpaper?.id])
 
   useEffect(() => {
     retryRef.current = 0
@@ -1441,8 +1975,10 @@ function WallpaperModal({ wallpaper, isFavorite, onClose, onFavorite, onDownload
 
   return (
     <div className={`modal-backdrop ${closing ? 'closing' : ''}`} onMouseDown={handleClose}>
-      <div className="detail-modal" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="detail-modal" ref={rootRef} tabIndex={-1} onMouseDown={(event) => event.stopPropagation()}>
         <button className="modal-close" onClick={handleClose} aria-label="关闭详情"><X size={18} /></button>
+        {hasSiblings && <><button className="detail-nav prev" onClick={onPrev} aria-label="上一张" title="上一张 (←)"><ChevronLeft size={20} /></button>
+        <button className="detail-nav next" onClick={onNext} aria-label="下一张" title="下一张 (→)"><ChevronRight size={20} /></button></>}
         <div className="detail-media">
           <div className="detail-media-bg" style={{ backgroundImage: `url("${thumbUrl}")` }} />
           {imageState.status === 'loading' && previewUrl && previewUrl !== imageState.url && (
@@ -1495,17 +2031,386 @@ function AccountModal({ config, onClose, onSaved, onDisconnect }) {
   return <div className={`modal-backdrop ${closing ? 'closing' : ''}`} onMouseDown={() => close(onClose)}><div className="small-modal account-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => close(onClose)}><X size={18} /></button><div className="modal-icon blue"><KeyRound size={22} /></div><div className="eyebrow">ACCOUNT CONNECTION</div><h2>连接你的 Wallhaven 账户</h2><p>官方 API 使用 API Key 认证，不需要在客户端输入或保存站内密码。</p><label>API Key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={config.apiKeySet ? '已配置，输入新 Key 可替换' : '粘贴 settings/account 中的 API Key'} /></label><label>Wallhaven 用户名<input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用于读取你的 collections" /></label><div className="modal-help"><CircleHelp size={15} /><span>API Key 可在 Wallhaven 的 Account Settings 中生成。Key 会使用系统安全存储保存。</span></div><div className="modal-actions"><div className="modal-action-group"><button className="text-button" onClick={() => window.wallhaven.openExternal('https://wallhaven.cc/settings/account')}><ExternalLink size={15} />打开账户设置</button>{config.apiKeySet && <button className="text-button danger-text" onClick={() => close(onDisconnect)}><X size={15} />断开连接</button>}</div><button className="primary-button" disabled={isSaving} onClick={save}>{isSaving ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存连接</button></div></div></div>
 }
 
-function SettingsModal({ config, onClose, onSaved, onChooseFolder }) {
+function ShortcutsPanel({ closing, onClose }) {
+  return (
+    <div className={`modal-backdrop shortcuts-backdrop ${closing ? 'closing' : ''}`} onMouseDown={onClose}>
+      <div className="small-modal shortcuts-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="modal-close" onClick={onClose} aria-label="关闭快捷键面板"><X size={18} /></button>
+        <div className="modal-icon blue"><Keyboard size={22} /></div>
+        <div className="eyebrow">KEYBOARD</div>
+        <h2>键盘快捷键</h2>
+        <p>不需要鼠标也能完成浏览、筛选和换壁纸。</p>
+        <div className="shortcut-list">
+          {SHORTCUTS.map((item) => (
+            <div className="shortcut-row" key={item.label}>
+              <span>{item.label}</span>
+              <div className="shortcut-keys">{item.keys.map((key) => <kbd key={key}>{key}</kbd>)}</div>
+            </div>
+          ))}
+        </div>
+        <div className="modal-actions"><span className="modal-footnote">在输入框内输入时这些快捷键会自动让位</span><button className="primary-button" onClick={onClose}>知道了</button></div>
+      </div>
+    </div>
+  )
+}
+
+function UpdateModal({ state, appInfo, onClose, onCheck, onDownload, onCancel, onInstall, onOpenRelease }) {
+  const { closing, close } = useClosing(240)
+  const status = state?.status || 'idle'
+  const currentVersion = state?.currentVersion || appInfo?.version || ''
+  const percent = Math.round(Number(state?.percent) || 0)
+  const isBusy = status === 'checking' || status === 'downloading'
+  const supported = state ? state.supported !== false : true
+  const errorText = status === 'error' ? (state?.error || '检查更新失败') : ''
+
+  const STATUS_TEXT = {
+    idle: '点击下方按钮检查是否有新版本。',
+    checking: '正在向 GitHub Releases 查询最新版本…',
+    available: `发现新版本 v${state?.newVersion}，可以现在下载。`,
+    downloading: `正在下载 v${state?.newVersion}…`,
+    downloaded: `v${state?.newVersion} 已下载完成，重启应用即可安装。`,
+    current: '当前已是最新版本。',
+    error: '检查更新失败，请稍后重试。',
+    unsupported: '开发模式不检查更新，请使用打包后的安装版'
+  }
+
+  const tone = status === 'error' ? 'danger' : status === 'available' || status === 'downloaded' ? 'blue' : 'cyan'
+  const releasePage = Boolean(state?.releasePage)
+
+  return (
+    <div className={`modal-backdrop ${closing ? 'closing' : ''}`} onMouseDown={() => close(onClose)}>
+      <div className="small-modal update-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="modal-close" onClick={() => close(onClose)} aria-label="关闭更新面板"><X size={18} /></button>
+        <div className={`modal-icon ${tone}`}>
+          {status === 'error' ? <TriangleAlert size={22} /> : status === 'downloaded' ? <Check size={22} /> : status === 'available' ? <Sparkles size={22} /> : <ArrowUpCircle size={22} />}
+        </div>
+        <div className="eyebrow">APPLICATION UPDATE</div>
+        <h2>检查更新</h2>
+        <p>{STATUS_TEXT[status] || STATUS_TEXT.idle}</p>
+
+        <div className="update-versions">
+          <div><span>当前版本</span><strong>v{currentVersion || '—'}</strong></div>
+          <ChevronRight size={16} className="update-arrow" />
+          <div><span>最新版本</span><strong>{state?.newVersion ? `v${state.newVersion}` : status === 'checking' ? '查询中…' : '—'}</strong></div>
+        </div>
+
+        {status === 'downloading' && (
+          <div className="update-progress">
+            <div className="download-progress"><div className="download-progress-bar" style={{ width: `${percent}%` }} /></div>
+            <div className="update-progress-meta">
+              <span>{percent}%{state?.total ? ` · ${formatBytes(state.transferred)} / ${formatBytes(state.total)}` : ''}</span>
+              <span>{state?.bytesPerSecond ? `${formatBytes(state.bytesPerSecond)}/s` : ''}</span>
+            </div>
+          </div>
+        )}
+
+        {status === 'available' && state?.releaseNotes && (
+          <div className="update-notes">
+            <div className="detail-section-title"><BookOpen size={15} />更新说明</div>
+            <pre>{state.releaseNotes}</pre>
+          </div>
+        )}
+
+        {status === 'error' && errorText && <div className="update-error"><TriangleAlert size={15} /><span>{errorText}</span></div>}
+
+        {!supported && status !== 'error' && <div className="update-error"><Info size={15} /><span>这是开发模式运行，只有打包后的安装版才能检查更新。</span></div>}
+
+        <div className="modal-actions">
+          <button className="text-button" disabled={!releasePage} onClick={onOpenRelease} title={releasePage ? '在浏览器中打开 GitHub Releases' : '未配置发布地址'}><ExternalLink size={15} />查看发布页面</button>
+          <div className="update-actions">
+            {status === 'downloading' && <button className="secondary-button" onClick={onCancel}>取消下载</button>}
+            {(status === 'idle' || status === 'current' || status === 'error' || status === 'unsupported') && (
+              <button className="primary-button" disabled={isBusy || !supported} onClick={onCheck}>{status === 'checking' ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}检查更新</button>
+            )}
+            {status === 'available' && <button className="primary-button" onClick={onDownload}><ArrowDownToLine size={16} />下载更新</button>}
+            {status === 'downloaded' && <button className="primary-button" onClick={onInstall}><RotateCw size={16} />重启并安装</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RotationPanel({ closing, rotation, onClose, onChange, onRunNow }) {
+  const enabled = Boolean(rotation?.enabled)
+  const source = rotation?.source || 'toplist'
+  const interval = String(rotation?.intervalMinutes || 60)
+  const [isRunning, setIsRunning] = useState(false)
+  const lastRun = rotation?.lastRunAt ? new Date(rotation.lastRunAt) : null
+
+  return (
+    <div className={`filter-overlay rotation-overlay ${closing ? 'closing' : ''}`}>
+      <div className="filter-backdrop" onClick={onClose} />
+      <div className="filter-popover rotation-popover">
+        <section className="filter-panel rotation-panel">
+          <div className="filter-header">
+            <div><strong>自动换壁纸</strong><span>按间隔把桌面换成一张新壁纸</span></div>
+            <button className="text-button" onClick={onClose} aria-label="关闭自动换壁纸"><X size={14} />关闭</button>
+          </div>
+
+          <div className="rotation-body">
+            <div className="rotation-switch-row">
+              <div>
+                <div className="filter-label">启用自动轮换</div>
+                <p className="rotation-hint">只在系统空闲超过 90 秒时才切换，不会打断你正在看的视频或全屏程序。</p>
+              </div>
+              <button
+                className={`switch ${enabled ? 'on' : ''}`}
+                role="switch"
+                aria-checked={enabled}
+                onClick={() => onChange?.({ enabled: !enabled })}
+              ><span /></button>
+            </div>
+
+            <div className="rotation-grid">
+              <div className="filter-group">
+                <div className="filter-label">壁纸来源</div>
+                <SelectMenu value={source} options={ROTATION_SOURCES} onChange={(next) => onChange?.({ source: next })} ariaLabel="壁纸来源" />
+                <p className="rotation-hint">{ROTATION_SOURCES.find((item) => item.value === source)?.hint}</p>
+              </div>
+              <div className="filter-group">
+                <div className="filter-label">更换间隔</div>
+                <SelectMenu value={interval} options={ROTATION_INTERVALS} onChange={(next) => onChange?.({ intervalMinutes: Number(next) })} ariaLabel="更换间隔" />
+                <p className="rotation-hint">最短 5 分钟，最长 24 小时。</p>
+              </div>
+            </div>
+
+            <div className="rotation-switch-row compact">
+              <div>
+                <div className="filter-label">同时设为锁屏</div>
+                <p className="rotation-hint">部分系统策略会拒绝此操作，失败时会保留桌面壁纸。</p>
+              </div>
+              <button
+                className={`switch ${rotation?.setLockScreen ? 'on' : ''}`}
+                role="switch"
+                aria-checked={Boolean(rotation?.setLockScreen)}
+                onClick={() => onChange?.({ setLockScreen: !rotation?.setLockScreen })}
+              ><span /></button>
+            </div>
+
+            <div className="rotation-status">
+              <div>
+                <span className="filter-label">上次更换</span>
+                <strong>{lastRun ? lastRun.toLocaleString('zh-CN', { hour12: false }) : '还没有运行过'}</strong>
+              </div>
+              <button className="secondary-button" disabled={isRunning} onClick={async () => {
+                setIsRunning(true)
+                try { await onRunNow?.() } finally { setIsRunning(false) }
+              }}>
+                {isRunning ? <LoaderCircle size={16} className="spin" /> : <RotateCw size={16} />}立即换一张
+              </button>
+            </div>
+
+            {rotation?.lastResult && (
+              <div className={`rotation-result ${rotation.lastResult.ok ? 'ok' : 'warn'}`}>
+                {rotation.lastResult.ok ? <Check size={14} /> : <TriangleAlert size={14} />}
+                <span>{rotation.lastResult.message || (rotation.lastResult.ok ? '已更换桌面壁纸' : '上次更换失败')}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="filter-footer">
+            <span>关闭窗口后仍会在托盘里按计划运行</span>
+            <button className="primary-button" onClick={onClose}>完成</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function ContextMenu({ data, onClose, onOpen, onDownload, onApply, onFavorite, onCopyId, onCopyLink, onSimilar }) {
+  const menuRef = useRef(null)
+
+  useEffect(() => {
+    function handlePointer(event) {
+      if (menuRef.current?.contains(event.target)) return
+      onClose()
+    }
+    function handleKey(event) {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('mousedown', handlePointer)
+    document.addEventListener('keydown', handleKey)
+    window.addEventListener('scroll', onClose, true)
+    window.addEventListener('resize', onClose)
+    return () => {
+      document.removeEventListener('mousedown', handlePointer)
+      document.removeEventListener('keydown', handleKey)
+      window.removeEventListener('scroll', onClose, true)
+      window.removeEventListener('resize', onClose)
+    }
+  }, [onClose])
+
+  const items = [
+    { label: '查看详情', icon: Info, run: onOpen },
+    { label: '下载原图', icon: Download, run: onDownload },
+    { label: '设为桌面壁纸', icon: Monitor, run: () => onApply('wallpaper') },
+    { label: '设为锁屏', icon: Lock, run: () => onApply('lockscreen') },
+    { separator: true },
+    { label: '查找相似壁纸', icon: Sparkles, run: onSimilar },
+    { label: '复制壁纸 ID', icon: Copy, run: onCopyId },
+    { label: '复制官网链接', icon: ExternalLink, run: onCopyLink },
+    { separator: true },
+    { label: '收藏 / 取消收藏', icon: Heart, run: onFavorite }
+  ]
+
+  return createPortal((
+    <div className="context-menu" ref={menuRef} style={{ left: data.x, top: data.y }} role="menu">
+      <div className="context-menu-head" title={data.wallpaper.title}>{data.wallpaper.title || `Wallhaven · ${data.wallpaper.id}`}</div>
+      {items.map((item, index) => (item.separator
+        ? <div className="context-menu-divider" key={`sep-${index}`} />
+        : (
+          <button key={item.label} className="context-menu-item" role="menuitem" onClick={() => { onClose(); item.run?.() }}>
+            <item.icon size={15} />
+            <span>{item.label}</span>
+          </button>
+        )))}
+    </div>
+  ), document.body)
+}
+
+function SettingsModal({ config, onClose, onSaved, onChooseFolder, onNotify, onFavoritesImported }) {
   const { closing, close } = useClosing(240)
   const [downloadPath, setDownloadPath] = useState(config.downloadPath || '')
   const [theme, setTheme] = useState(config.theme || 'system')
+  const [wallpaperStyle, setWallpaperStyle] = useState(config.wallpaperStyle || 'fill')
+  const [closeToTray, setCloseToTray] = useState(config.closeToTray !== false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [appInfo, setAppInfo] = useState(null)
+  const [busy, setBusy] = useState('')
+
+  useEffect(() => {
+    window.wallhaven?.app?.info?.().then(setAppInfo).catch(() => {})
+  }, [])
+
   async function save() {
-    const next = await window.wallhaven.config.save({ downloadPath, theme })
-    close(() => onSaved(next))
+    setIsSaving(true)
+    try {
+      let next = await window.wallhaven.config.save({ downloadPath, theme, closeToTray })
+      if (wallpaperStyle !== (config.wallpaperStyle || 'fill')) {
+        const result = await window.wallhaven.wallpaper.setStyle(wallpaperStyle)
+        next = { ...next, wallpaperStyle: result?.current || wallpaperStyle }
+      }
+      close(() => onSaved(next))
+    } finally {
+      setIsSaving(false)
+    }
   }
-  return <div className={`modal-backdrop ${closing ? 'closing' : ''}`} onMouseDown={() => close(onClose)}><div className="small-modal settings-modal" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => close(onClose)}><X size={18} /></button><div className="modal-icon amber"><Settings size={22} /></div><div className="eyebrow">PREFERENCES</div><h2>偏好设置</h2><p>调整本地下载行为与应用显示风格。</p><label>壁纸下载目录<div className="input-with-button"><input value={downloadPath} onChange={(event) => setDownloadPath(event.target.value)} /><button onClick={async () => { await onChooseFolder(); const next = await window.wallhaven.config.get(); setDownloadPath(next.downloadPath) }}><FolderOpen size={16} />选择</button></div></label><div className="settings-label">界面主题</div><div className="theme-grid">{THEME_OPTIONS.map((option) => { const Icon = option.icon; const isActive = theme === option.value; return <button key={option.value} type="button" className={`theme-card ${isActive ? 'active' : ''}`} onClick={() => setTheme(option.value)} aria-pressed={isActive}><span className="theme-card-icon"><Icon size={16} /></span><span className="theme-card-copy"><strong>{option.label}</strong><small>{option.hint}</small></span>{isActive && <Check size={14} className="theme-card-check" />}</button> })}</div><div className="settings-note"><Info size={15} /><span>本地收藏保存在当前用户的浏览器数据中，API Key 使用 Electron 安全存储。</span></div><div className="modal-actions"><button className="text-button" onClick={() => window.wallhaven.download.openFolder()}><FolderOpen size={15} />打开下载目录</button><button className="primary-button" onClick={save}><Check size={16} />保存设置</button></div></div></div>
+
+  async function exportFavorites() {
+    setBusy('export')
+    try {
+      const result = await window.wallhaven.favorites.export()
+      if (!result?.canceled) onNotify?.(`已导出 ${result.count} 条收藏`)
+    } catch (error) {
+      onNotify?.(error?.message || '导出失败', 'warning')
+    } finally { setBusy('') }
+  }
+
+  async function importFavorites() {
+    setBusy('import')
+    try {
+      const result = await window.wallhaven.favorites.import()
+      if (!result?.canceled) {
+        onFavoritesImported?.(result.items || [])
+        onNotify?.(`已导入，当前收藏 ${result.items?.length || 0} 条`)
+      }
+    } catch (error) {
+      onNotify?.(error?.message || '导入失败', 'warning')
+    } finally { setBusy('') }
+  }
+
+  return (
+    <div className={`modal-backdrop ${closing ? 'closing' : ''}`} onMouseDown={() => close(onClose)}>
+      <div className="small-modal settings-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="modal-close" onClick={() => close(onClose)} aria-label="关闭设置"><X size={18} /></button>
+        <div className="modal-icon amber"><Settings size={22} /></div>
+        <div className="eyebrow">PREFERENCES</div>
+        <h2>偏好设置</h2>
+        <p>调整本地下载行为、壁纸显示方式与应用显示风格。</p>
+
+        <label>壁纸下载目录
+          <div className="input-with-button">
+            <input value={downloadPath} onChange={(event) => setDownloadPath(event.target.value)} />
+            <button onClick={async () => { await onChooseFolder(); const next = await window.wallhaven.config.get(); setDownloadPath(next.downloadPath) }}><FolderOpen size={16} />选择</button>
+          </div>
+        </label>
+
+        <div className="settings-label">桌面壁纸显示方式</div>
+        <div className="style-grid">
+          {WALLPAPER_STYLES.map((option) => (
+            <button key={option.value} type="button" className={`style-card ${wallpaperStyle === option.value ? 'active' : ''}`} onClick={() => setWallpaperStyle(option.value)} aria-pressed={wallpaperStyle === option.value}>
+              <strong>{option.label}</strong>
+              <small>{option.hint}</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="settings-label">界面主题</div>
+        <div className="theme-grid">{THEME_OPTIONS.map((option) => { const Icon = option.icon; const isActive = theme === option.value; return <button key={option.value} type="button" className={`theme-card ${isActive ? 'active' : ''}`} onClick={() => setTheme(option.value)} aria-pressed={isActive}><span className="theme-card-icon"><Icon size={16} /></span><span className="theme-card-copy"><strong>{option.label}</strong><small>{option.hint}</small></span>{isActive && <Check size={14} className="theme-card-check" />}</button> })}</div>
+
+        <div className="settings-toggle-row">
+          <div><strong>关闭窗口时最小化到托盘</strong><span>关掉后点 × 会直接退出应用</span></div>
+          <button className={`switch ${closeToTray ? 'on' : ''}`} role="switch" aria-checked={closeToTray} onClick={() => setCloseToTray((current) => !current)}><span /></button>
+        </div>
+
+        <div className="settings-label">本地收藏</div>
+        <div className="settings-inline-actions">
+          <button className="secondary-button" disabled={busy === 'export'} onClick={exportFavorites}>{busy === 'export' ? <LoaderCircle size={15} className="spin" /> : <ArrowDownToLine size={15} />}导出为 JSON</button>
+          <button className="secondary-button" disabled={busy === 'import'} onClick={importFavorites}>{busy === 'import' ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}从 JSON 导入</button>
+        </div>
+
+        <div className="settings-note"><Info size={15} /><span>收藏保存在应用数据目录的 favorites.json，可随时备份；API Key 使用系统安全存储。{appInfo ? ` 当前版本 v${appInfo.version}${appInfo.portable ? ' · 便携数据' : ''}` : ''}</span></div>
+        <div className="modal-actions">
+          <button className="text-button" onClick={() => window.wallhaven.download.openFolder()}><FolderOpen size={15} />打开下载目录</button>
+          <button className="primary-button" disabled={isSaving} onClick={save}>{isSaving ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}保存设置</button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
-function AppErrorBoundary({ children }) { return children }
+function AppErrorBoundary({ children }) {
+  return <ErrorBoundaryInner>{children}</ErrorBoundaryInner>
+}
+
+class ErrorBoundaryInner extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null, info: '' }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    // 控制台留一份，方便用户反馈时复制
+    console.error('[Wallhaven Studio] 渲染异常', error, info?.componentStack)
+    this.setState({ info: String(info?.componentStack || '').slice(0, 1200) })
+  }
+
+  render() {
+    const { error, info } = this.state
+    if (!error) return this.props.children
+    return (
+      <div className="crash-screen">
+        <div className="crash-card">
+          <div className="crash-icon"><TriangleAlert size={26} /></div>
+          <div className="eyebrow">SOMETHING BROKE</div>
+          <h1>界面遇到了未预期的错误</h1>
+          <p>应用没有退出，你的下载记录和收藏都还在。可以先重试；如果反复出现，请把下面的信息一起反馈。</p>
+          <pre className="crash-detail">{String(error?.message || error)}{info ? `\n${info}` : ''}</pre>
+          <div className="crash-actions">
+            <button className="primary-button" onClick={() => this.setState({ error: null, info: '' })}>重试渲染</button>
+            <button className="secondary-button" onClick={() => window.location.reload()}>重新加载应用</button>
+            <button className="text-button" onClick={() => navigator.clipboard?.writeText(String(error?.stack || error))}>复制错误信息</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+}
 
 createRoot(document.getElementById('root')).render(<AppErrorBoundary><App /></AppErrorBoundary>)
